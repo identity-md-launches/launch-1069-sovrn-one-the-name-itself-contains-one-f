@@ -34,7 +34,7 @@ Only the supplied PoolManager drives hook callbacks. Only the supplied factory, 
 | File | Added checks |
 | --- | --- |
 | `FeeDifferential.t.sol` | Four exact modes against an equally seeded unhooked pool at the launch price; all three required decay times; partial fills and tiny amounts; exact trader, manager and vault movements; LP growth, price, liquidity and protocol-fee rollback; no unsettled deltas after unlock. |
-| `SettlementFailures.t.sol` | Empty manager, one wei below the fee, exactly the fee and one wei above; no mixed partial payment; permissionless claim redemption; underpaid ETH and unapproved SVO input roll back prior fees and AMM state; nested-unlock redemption and bad quote limits recover cleanly. |
+| `SettlementFailures.t.sol` | Empty manager, one wei below the fee, exactly the fee and one wei above; no mixed partial payment; permissionless claim redemption; underpaid ETH and unapproved SVO input roll back prior fees and AMM state; nested-unlock redemption and bad quote limits recover cleanly. Revision additions check accumulated dust-claim rounding, repeated redemption, zero-fee trades with pending claims, and failed settlement preserving earlier claims in both payment modes. |
 | `TokenFailurePaths.t.sol` | Finite allowance rollback when balance or recipient checks fail; deployer cannot spend another holder's balance; overwrite and revocation; delegated self-transfer; zero transfers; unlimited allowance through burns and failed spends. |
 | `VaultCallbackBoundaries.t.sol` | Full uint256 receipt arithmetic including the maximum, checked against full-precision `FullMath`; a Safe refunds ETH and burns SVO during either withdrawal; same-function and cross-function reentry; a later Safe rejection rolls back those nested actions; counterfactual prefunding and forced dust. |
 | `VaultModelInvariants.t.sol` | Independent ledgers for each reserve, withdrawals, forced ETH, held SVO and burns; random donations, both withdrawals, overdraws, unauthorized calls, rejecting receivers, SVO transfers and burns. |
@@ -43,6 +43,8 @@ Only the supplied PoolManager drives hook callbacks. Only the supplied factory, 
 Fee comparisons use actual unhooked AMM deltas rather than treating hook events as the oracle. For exact-input buys, the reference input excludes `floor(requestedETH × rate / 10^18)`; partial fills charge `floor(actualAMMETH × rate / (10^18 − rate))`. Exact-output buys use the latter formula. Exact-input sells charge `floor(actualGrossETH × rate / 10^18)`. Exact-output sells quote `floor(requestedNetETH × 10^18 / (10^18 − rate))` and charge on actual gross output. These are the specified base formulas.
 
 The differential fixture additionally enables distinct protocol fees, 500 and 1000 in v4's directional fee units. They are test inputs for detecting a persisted quote, not changes to the launch manifest.
+
+The added rounding regression executes opening buys of 6, 18 and 54 wei, collecting fees of 3, 9 and 27 wei. Direct receipts allocate 29/10 wei to inference/buyback; redeeming all 39 wei together allocates 28/11. This follows the specified split per vault receipt. Both paths deliver all fees to the vault, and repeating redemption changes no balances. A separate regression starts with an existing 0.0005 ETH claim, fails settlement of a later 0.005 ETH fee in each payment mode, then retries and redeems the full 0.0055 ETH.
 
 ## Stateful checking and execution
 
@@ -59,4 +61,4 @@ forge test --out test/scratch/out --cache-path test/scratch/cache
 
 No submitted test imports from `test/scratch/` or `.imd/reads/`. The pinned protected suites were read as task inputs; their environment-dependent wrappers are not copied into the offline suite. These tests do not verify live Sepolia Safe ownership, RPC state, or externally supplied deployment addresses.
 
-Local verification: `forge build` succeeded; the full `forge test` run reported **63 passed, 0 failed, 0 skipped** across 15 suites. Both invariant campaigns completed 24,576 handler calls with zero unexpected reverts. Formatting checks passed for the changed Solidity files. No implementation defect was reproduced in this contribution.
+Local revision verification: `forge build` succeeded; the full `forge test` run reported **71 passed, 0 failed, 0 skipped** across 16 suites. Both invariant campaigns completed 256 runs of 96 calls each (24,576 handler calls per campaign) with zero unexpected reverts. Formatting checks passed for the changed Solidity file. This revision adds three tests to the existing settlement suite; no implementation defect was reproduced.

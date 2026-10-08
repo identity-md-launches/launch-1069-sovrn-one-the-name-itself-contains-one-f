@@ -114,6 +114,96 @@ contract SettlementFailuresTest is SystemBase {
         assertEq(token.allowance(address(this), address(router)), 0);
     }
 
+    function test_dustFeesSplitPerReceiptForDirectAndAccumulatedClaims() public {
+        // At the opening 50% rate these buys pay 3, 9 and 27 wei. On an
+        // empty manager each next fee exceeds the ETH settled by earlier buys.
+        uint256[3] memory amounts = [uint256(6), 18, 54];
+        for (uint256 direct; direct < 2; ++direct) {
+            uint256 snapshot = vm.snapshotState();
+            uint256 backing = direct == 1 ? 100 : 0;
+            if (backing != 0) new ForceETH{value: backing}(payable(address(manager)));
+            uint256 fees;
+            for (uint256 i; i < amounts.length; ++i) {
+                BalanceDelta d = _trade(true, -int256(amounts[i]));
+                assertEq(int256(d.amount0()), -int256(amounts[i]));
+                fees += amounts[i] / 2;
+                assertEq(hook.claimFees(), direct == 1 ? 0 : fees);
+                assertEq(manager.balanceOf(address(hook), 0), direct == 1 ? 0 : fees);
+                assertEq(address(vault).balance, direct == 1 ? fees : 0);
+            }
+            assertEq(fees, 39);
+            if (direct == 0) {
+                vm.expectEmit(true, false, false, true, address(vault));
+                emit LifeForceFunded(address(manager), 39, 28, 11);
+            }
+            uint256 callerBefore = ALICE.balance;
+            vm.prank(ALICE);
+            hook.redeemFees();
+            // Three direct receipts round separately: 0 + 2 + 8 buyback wei.
+            // Accumulated claims are one 39-wei receipt: floor(39 * 3 / 10).
+            assertEq(vault.buybackReserve(), direct == 1 ? 10 : 11);
+            assertEq(vault.inferenceReserve(), direct == 1 ? 29 : 28);
+            assertEq(address(vault).balance, 39);
+            assertEq(address(manager).balance, backing + 39);
+            assertEq(ALICE.balance, callerBefore, "redemption must only pay the vault");
+            assertEq(hook.claimFees(), 0);
+            assertEq(manager.balanceOf(address(hook), 0), 0);
+            bytes32 redeemed = _stateDigest();
+            hook.redeemFees();
+            assertEq(_stateDigest(), redeemed, "repeated redemption must not pay twice");
+            _assertSettled();
+            assertTrue(vm.revertToStateAndDelete(snapshot));
+        }
+    }
+
+    function test_zeroRoundedFeePreservesPendingClaims() public {
+        _trade(true, -6);
+        assertEq(hook.claimFees(), 3);
+        BalanceDelta d = _trade(true, -1);
+        assertEq(d.amount0(), -1);
+        assertEq(hook.claimFees(), 3);
+        assertEq(manager.balanceOf(address(hook), 0), 3);
+        assertEq(address(vault).balance, 0);
+        assertEq(address(manager).balance, 7);
+        hook.redeemFees();
+        assertEq(vault.inferenceReserve(), 3);
+        assertEq(vault.buybackReserve(), 0);
+        assertEq(address(vault).balance, 3);
+        assertEq(address(manager).balance, 4);
+        assertEq(hook.claimFees(), 0);
+        assertEq(manager.balanceOf(address(hook), 0), 0);
+        _assertSettled();
+    }
+
+    function test_failedSettlementPreservesEarlierClaimsInBothPaymentModes() public {
+        _trade(true, -0.001 ether);
+        assertEq(hook.claimFees(), 0.0005 ether);
+        for (uint256 direct; direct < 2; ++direct) {
+            uint256 snapshot = vm.snapshotState();
+            if (direct == 1) new ForceETH{value: 1 ether}(payable(address(manager)));
+            bytes32 beforeState = _stateDigest();
+            // The second fee is 0.005 ETH. Without extra backing it mints
+            // another claim; with backing it pays the vault before settlement.
+            vm.expectRevert();
+            router.trade(key, SwapParams(true, -0.01 ether, TickMath.MIN_SQRT_PRICE + 1));
+            assertEq(_stateDigest(), beforeState, "failed trade changed earlier fees");
+            _assertSettled();
+            _trade(true, -0.01 ether);
+            assertEq(hook.claimFees(), direct == 1 ? 0.0005 ether : 0.0055 ether);
+            assertEq(manager.balanceOf(address(hook), 0), hook.claimFees());
+            assertEq(address(vault).balance, direct == 1 ? 0.005 ether : 0);
+            vm.prank(BOB);
+            hook.redeemFees();
+            assertEq(hook.claimFees(), 0);
+            assertEq(manager.balanceOf(address(hook), 0), 0);
+            assertEq(address(vault).balance, 0.0055 ether);
+            assertEq(vault.inferenceReserve(), 0.00385 ether);
+            assertEq(vault.buybackReserve(), 0.00165 ether);
+            _assertSettled();
+            assertTrue(vm.revertToStateAndDelete(snapshot));
+        }
+    }
+
     function test_nestedUnlockRedemptionFailsAtomicallyAndCanRetry() public {
         _trade(true, -0.01 ether);
         RedemptionDuringUnlock probe = new RedemptionDuringUnlock(manager, hook);
