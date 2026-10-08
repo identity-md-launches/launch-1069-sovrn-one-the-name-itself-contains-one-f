@@ -24,8 +24,8 @@ def sha256(path):
 def build_record():
     command("forge", "build")
     manifest = json.loads((ROOT / "launch.json").read_text())
-    assert set(manifest) == {"kind", "chainId", "hook", "token", "pool", "notes"}
-    assert manifest["kind"] == "univ4_hook" and manifest["chainId"] == 11155111
+    assert set(manifest) == {"kind", "hook", "token", "pool", "notes"}
+    assert manifest["kind"] == "univ4_hook"
     assert manifest["token"] == {
         "contract": "SovrnToken", "name": "SOVRN.ONE", "symbol": "SVO", "decimals": 18
     }

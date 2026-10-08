@@ -1,6 +1,6 @@
 # SOVRN.ONE / SVO
 
-SVO trading fees fund the inference of a voice AI. All hook fees, collected only in native ETH, go to one immutable LifeForceVault: 70% is earmarked for inference and 30% for manually buying SVO to burn. Holders receive no payouts. The vault only accounts for ETH; the Safe performs purchases outside the vault.
+Trading fees from the launch's SVO/ETH pool fund the inference of a voice AI. All hook fees, collected only in native ETH, go to one immutable LifeForceVault: 70% is earmarked for inference and 30% for manually buying SVO to burn. Holders receive no payouts. The vault only accounts for ETH; the Safe performs purchases outside the vault.
 
 This project adapts IMD launch #1040, `identity-md-launches/launch-1040-og-symbol-og-the-launch-s-standard-token`, commit `c1d98b5`, under the existing MIT source licences. Changes: renamed the token and hook to SovrnToken and SovrnHook; replaced the distributor and auction with LifeForceVault; removed the collection dependency, NFT activation, rewards, auctions and team payments; consolidated deferred fees into one claim counter; updated preparation, manifest, tests and documentation. The base's fee mathematics, quote mechanism, guards, errors and five permissions are preserved. Build configuration and vendored dependencies are unchanged.
 
@@ -29,6 +29,8 @@ The token has plain ERC-20 transfers and allowances, with no tax, owner, further
 
 ## Fees and settlement
 
+The hook fee applies only to the single pool identified by `hook.poolKey()`. Anyone can create and fund another SVO/ETH pool without this hook; trades there pay no fee to this vault and do not use the launch buy-fee decay. SVO transfers and trading on other venues are unrestricted.
+
 Sells always pay **3.5%**. Buys begin at **50%**, decay linearly for **3,600 seconds (60 minutes)** from the successful pool initialization timestamp, and stay at **3.5%** thereafter. At elapsed **0 / 1800 / 3600 seconds**, the buy rates are **50% / 26.75% / 3.5%**, and `decayMinutesLeft()` is **60 / 30 / 0**. Partial remaining minutes round up. Before initialization the views show 50% and 60 minutes.
 
 The rate uses WAD **10^18**: `NORMAL_FEE = 35 * 10^15`, opening rate `5 * 10^17`, and the decreasing component is `465 * 10^15 * (3600 - elapsed) / 3600`. Integer divisions round down, preserving the base including tiny-amount rounding. Fees depend on actual AMM ETH movement, including LP fees on buys, never on SVO transfer amounts.
@@ -46,6 +48,8 @@ For ETH-specified modes, a self-only reverting quote swap measures the actual na
 
 Anyone can call `redeemFees()` after settlement. It opens a manager unlock, burns all recorded claims and takes the ETH directly to the immutable vault. Failure reverts the counter reset and claim burn, permitting a later retry when sufficient backing is available. A zero counter is a no-op. Redemption while the manager is already unlocked cannot open another unlock and must be retried after settlement. Multiple swaps per unlock and mixed direct/deferred payments are supported. Claim amounts sent directly to the hook by third parties are not hook fees and are not included in its counter.
 
+Send voluntary funding to `hook.vault()`. The hook rejects ordinary ETH sends, but its inherited manager-only receive function accepts ETH routed through a third party's own manager unlock. Such ETH remains permanently in the hook, as do unsolicited ERC-6909 claims beyond `claimFees`: there is no forwarding or rescue function for either. These deposits do not divert recorded hook fees; direct fees and recorded claim redemptions still go entirely to the vault.
+
 The vault's receive function accepts ETH without external calls. If the fee destination were to reject ETH, a direct take would revert the swap; minting claims does not call the destination, but their redemption would revert until it can accept ETH. A rejecting REFUEL_SAFE only prevents its own withdrawals; fees continue accumulating in the vault.
 
 ## Vault accounting and callers
@@ -59,7 +63,7 @@ The vault's receive function accepts ETH without external calls. If the fee dest
 | REFUEL_SAFE only | `withdrawInference(amount)` and `withdrawBuyback(amount)`, each bounded by its own reserve and paid only to REFUEL_SAFE. Both use a shared reentrancy guard, debit before payment, and revert all changes on failed payment. Zero withdrawal is a no-op payment with an event. |
 | Anyone | Fund the vault with ETH, transfer SVO to it, call `burn()` or `redeemFees()`, and read all public views. |
 | Anyone calling `burn()` | Send the vault's **entire** SVO balance only to DEAD. Zero balance reverts. No ETH is moved, no approvals are issued, and there is no alternate token recipient. |
-| Supplied factory via PoolManager | Initialize the single native ETH/SVO pool once. It must use fee 12500, this hook, and positive tick spacing. The first spacing is bound permanently; the manifest selects 60. Initialization and deployment must be atomic. |
+| Supplied factory via PoolManager | Initialize the single native ETH/SVO pool once. It must use fee 12500, this hook, and positive tick spacing. The first spacing is bound permanently; the manifest selects 60. Deployment, initialization and initial liquidity seeding must be atomic. |
 | Supplied PoolManager only | Drive `beforeInitialize`, `beforeSwap`, `afterSwap` and `unlockCallback`; callbacks also enforce their pool and operation state. |
 | Hook itself only | Enter the reverting quote helper while a swap is active. |
 
@@ -75,14 +79,22 @@ The unchanged `foundry.toml` pins **Solidity 0.8.26**, **Cancun**, optimizer **2
 
 1. Supply the actual chain PoolManager, freshly deployed SovrnToken and initializing factory to `initCode(manager, token, factory)`. The token has no constructor arguments and the factory must hold its whole initial supply.
 2. Hash that code and call `mine(create2Deployer, initCodeHash, firstSalt, attempts)`. The CREATE2 deployer is the actual contract executing CREATE2; it need not equal the initializing factory argument. The helper reports success, salt and predicted address. If no match is found, continue at `firstSalt + attempts` without overflowing uint256.
-3. Check `predict(create2Deployer, salt, initCodeHash)` and the low 14 bits (**8396**), then have the launch system deploy exactly that code and initialize the manifest pool atomically. The initialization callback also prevents preinitializing an address without hook code. A previous base salt must be mined again for this new initcode.
+3. Check `predict(create2Deployer, salt, initCodeHash)` and the low 14 bits (**8396**), then have the launch system deploy exactly that code, initialize the manifest pool and seed its initial liquidity atomically. The initialization callback also prevents preinitializing an address without hook code. A previous base salt must be mined again for this new initcode.
 4. Check chain id **11155111**, constructor arguments, token identity, Safe address, vault linkage and bytecode against the prepared artifacts. `launch-attestation.json` records source hashes, compiler settings, ABIs and constructor-free creation bytecode hashes; regenerate with `python3 script/attest.py`, or verify with `python3 script/attest.py --check`. Concrete hook initcode includes the actual three arguments and cannot have one universal hash or salt.
 
+The manifest has exactly five top-level keys: `kind`, `hook`, `token`, `pool` and `notes`. The rehearsal chain id remains in its notes and in the attestation's `chainId` field; deployment tooling must enforce it. The attestation binds the manifest and every delivered test file by SHA-256, excluding disposable `test/scratch/` files.
+
+Confirm atomic liquidity seeding in the actual factory transaction before launch. An initialized v4 pool with no liquidity permits a zero-delta swap to move its price to the caller's limit at no token or ETH cost. The unchanged hook charges zero on that zero ETH delta; deployment plus initialization alone cannot protect the opening price while liquidity is absent.
+
 After launch, no setters or setup transactions exist. The Safe operators monitor both reserves and ETH claim backing, arrange permissionless redemption when needed, withdraw inference funds to pay for voice AI inference, and withdraw buyback funds to manually acquire SVO with appropriate trade limits. They transfer acquired SVO to the vault and anyone calls `burn()`. The contracts enforce withdrawal destination and reserve bounds; they cannot enforce what the Safe does with withdrawn ETH or schedule its purchases. Operators must confirm control of the specified Safe and its ability to receive ETH on Sepolia before launch. The supplied Safe identity is a requester parameter, not independently verified here. A mainnet variant changes the chain id and REFUEL_SAFE, then rebuilds, retests and mines new salts.
+
+Both reserves pay the same REFUEL_SAFE, which can withdraw their combined balance without any SVO purchase or burn. The 70/30 split is accounting only. If this address is operated as a Safe, its proxy must exist on Sepolia and accept plain ETH; deployment on another chain does not establish that capability here.
 
 ## Validation and scope
 
 Run `forge build`, `forge test` and `forge fmt --check`. All integration tests use the **real vendored v4 PoolManager deployed locally**, with a minimal settlement router; no mock manager, RPC, environment variables, FFI or filesystem cheatcodes are required. Most unit fixtures place the hook at a valid flagged address; `Launch.t.sol` additionally mines and deploys the real CREATE2 initcode and checks child deployment, opening price, factory authorization, EIP-170 and EIP-3860 size bounds.
+
+Run `python3 -B -I -m unittest discover -s test -p test_attestation.py -v` for attestation regressions. These use the real compiled artifacts and isolated temporary delivery copies to test generation, checking, changed manifests, added or changed test files, and rejection of extra manifest keys. `RevisionBoundaries.t.sol` reproduces unsolicited deposits, recorded-fee redemption alongside stray claims, empty-pool price movement and trading without this hook.
 
 The retained fee suite covers all four exact modes, partial fills, tiny amounts, initialization guards and comparison of quote state with an unhooked pool. New tests cover direct and claim settlement, all four modes on an empty manager in one unlock, claim retries, precise permissions, Safe withdrawal success/failure/reentrancy, reserve rounding, full burns, absence of administration and forced ETH. Stateful invariants cover trading, decay, claim redemption, donations, withdrawals, rejecting receivers and burns, ending with complete ETH withdrawal. See `test/REVIEW.md` for imported-finding reproductions and evidence.
 
