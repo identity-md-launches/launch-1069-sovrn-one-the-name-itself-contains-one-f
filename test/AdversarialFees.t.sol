@@ -162,6 +162,9 @@ contract AdversarialFeesTest is FeeAssertions {
             vm.prank(address(manager));
             vm.expectRevert(SovrnHook.WrongPool.selector);
             hook.beforeSwap(address(router), bad, SwapParams(true, -1, LAUNCH_PRICE / 2), "");
+            vm.prank(address(manager));
+            vm.expectRevert(SovrnHook.WrongPool.selector);
+            hook.afterSwap(address(router), bad, SwapParams(true, -1, LAUNCH_PRICE / 2), BalanceDelta.wrap(0), "");
         }
         vm.prank(address(manager));
         vm.expectRevert(SovrnHook.Unauthorized.selector);
